@@ -17,7 +17,7 @@ export default function ModelEvidence({ standalone = false }: { standalone?: boo
       <div><div className="section-label">09 / MODEL EVIDENCE</div><h2 id="model-evidence-title">Measure the <em>prediction.</em></h2>
         <p>Two trained Random Forest regressors plus a training-only late-life trend. Same chronological holdout for the baseline and revised predictions.</p></div>
       <div className="evidence-actions">
-        <span className="evidence-notice">For the source ZIP, use v0&apos;s Block menu → Download ZIP.</span>
+        <a className="outline-button" href="/downloads/aerotwin-improved-prototype.zip" download="aerotwin-improved-prototype.zip">Download AeroTwin prototype ZIP</a>
         {!standalone && <Link href="/model-evidence" className="outline-button">FULL EVIDENCE <ArrowUpRight size={14} /></Link>}
         <button className="run-button" onClick={() => void mutate()} disabled={isValidating}><RefreshCw size={14} /> {isValidating ? "LOADING" : "REFRESH METRICS"}</button>
       </div>

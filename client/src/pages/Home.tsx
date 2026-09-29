@@ -1,4 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { Suspense, useEffect, useMemo, useState } from "react";
+import ErrorBoundary from "@/components/ErrorBoundary";
+import { deriveEngineParts, type EnginePart } from "@/lib/engineTelemetry";
+import type { EnginePartId } from "@/lib/engineParts";
+
+const EngineViewport3D = React.lazy(() => import("@/components/EngineViewport3D"));
 import useSWR from "swr";
 import {
   Activity,
@@ -10,17 +15,14 @@ import {
   Check,
   ChevronRight,
   CircleDot,
-  Droplets,
   Columns2,
   Expand,
   Gauge,
-  Fan,
   History,
   Info,
   Layers3,
   LockKeyhole,
   Menu,
-  MousePointer2,
   Moon,
   Pause,
   Play,
@@ -29,7 +31,6 @@ import {
   Compass,
   Search,
   Send,
-  Smartphone,
   ShieldCheck,
   SlidersHorizontal,
   SkipBack,
@@ -71,12 +72,17 @@ import {
 } from "@/hooks/usePrognosticStream";
 import ModelEvidence from "@/components/ModelEvidence";
 import { MaintenanceAdvisory } from "@/components/MaintenanceAdvisory";
-import Drone3D from "@/components/Drone3D";
+const Drone3D = React.lazy(() => import("@/components/Drone3D"));
 import { EndurancePanel } from "@/components/EndurancePanel";
+import { RoleControl, RoleNotice, RoleSection } from "@/components/RoleAccess";
 import { Link } from "wouter";
+import { initials, roleGate, useDemoAuth, type DemoRole } from "@/lib/demoAuth";
 import { FlightLog, getLastReplayId, getThemePreference, saveLastReplayId, saveThemePreference } from "@/lib/flightLogStore";
 import { fetchReplayRuns } from "@/lib/replayApi";
 import { ScenarioPanel, EfficiencyTrend } from "@/components/ScenarioPanel";
+import { EngineStatusSummary } from "@/components/EngineStatusSummary";
+import { Skeleton } from "@/components/ui/skeleton";
+import { toast } from "sonner";
 
 const navItems = [
   { label: "Overview", icon: Gauge, target: "section-overview" },
@@ -84,7 +90,6 @@ const navItems = [
   {
     label: "Diagnostics",
     icon: TriangleAlert,
-    count: "04",
     target: "section-diagnostics",
   },
   {
@@ -134,6 +139,10 @@ function InfoTooltip({ text }: { text: string }) {
   );
 }
 
+function MetricLabel({ label, meaning }: { label: string; meaning: string }) {
+  return <span>{label} <InfoTooltip text={`What this means: ${meaning}`} /></span>;
+}
+
 type LandingZone = {
   id: string;
   name: string;
@@ -146,10 +155,13 @@ type LandingZone = {
 function MissionPlanner({
   telemetry,
   missionId,
+  role,
 }: {
   telemetry: any;
   missionId: string;
+  role: DemoRole;
 }) {
+  const opGate = roleGate(role, "Operator");
   const [mode, setMode] = useState<"RTB" | "EMERGENCY LANDING">("RTB");
   const [saved, setSaved] = useState(false);
   const {
@@ -171,11 +183,18 @@ function MissionPlanner({
         : "No zones within safe radius";
   const landing = mode === "RTB" ? "Launch base · 4.8 km" : recommendedLabel;
   const createMission = async () => {
-    const response = await fetch(`/api/missions/${encodeURIComponent(missionId)}/decision`, {
-      method: "PATCH", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: mode, landingMode: landing }),
-    });
-    setSaved(response.ok);
+    try {
+      const response = await fetch(`/api/missions/${encodeURIComponent(missionId)}/decision`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: mode, landingMode: landing }),
+      });
+      setSaved(response.ok);
+      if (response.ok) toast.success("Mission decision saved");
+      else toast.error("Could not save decision. Check the connection and try again.");
+    } catch {
+      setSaved(false);
+      toast.error("Connection lost. Reconnect and try saving again.");
+    }
   };
   return (
     <section id="section-maintenance" className="mission-section">
@@ -199,11 +218,9 @@ function MissionPlanner({
             <div className="map-grid" />
             <div className="flight-path" />
             <div className="drone-3d-canvas">
-              <Drone3D
-                mode={mode}
-                hasFault={telemetry.faults.length > 0}
-                anomaly={telemetry.anomaly}
-              />
+<Suspense fallback={<Skeleton className="h-full w-full" />}>
+                  <Drone3D mode={mode} hasFault={telemetry.faults.length > 0} anomaly={telemetry.anomaly} />
+                </Suspense>
             </div>
             <div className="base-marker">BASE</div>
             <div className="landing-marker">
@@ -273,21 +290,24 @@ function MissionPlanner({
               least-populated landing zone from the mission grid.
             </p>
           </div>
+          <RoleNotice role={role} required="Operator" />
           <div className="decision-buttons">
-            <button
+            <RoleControl role={role} required="Operator"><button
               className={mode === "RTB" ? "selected" : ""}
-              onClick={() => setMode("RTB")}
+              onClick={() => { setMode("RTB"); setSaved(false); toast.info("Return to base selected. Save to confirm this decision."); }}
+              {...opGate}
             >
               RETURN TO BASE <small>nominal recovery</small>
-            </button>
-            <button
+            </button></RoleControl>
+            <RoleControl role={role} required="Operator"><button
               className={
                 mode === "EMERGENCY LANDING" ? "selected emergency" : ""
               }
-              onClick={() => setMode("EMERGENCY LANDING")}
+              onClick={() => { setMode("EMERGENCY LANDING"); setSaved(false); toast.info("Emergency landing selected. Save to confirm this decision."); }}
+              {...opGate}
             >
               EMERGENCY LANDING <small>least-populated area</small>
-            </button>
+            </button></RoleControl>
           </div>
           <div className="decision-readout">
             <span>RECOMMENDED ZONE</span>
@@ -295,9 +315,9 @@ function MissionPlanner({
             <span>SAFE RADIUS</span>
             <strong>5 km · candidate search radius</strong>
           </div>
-          <button className="run-button mission-save" onClick={createMission} disabled={missionId === "UNASSIGNED"}>
+          <RoleControl role={role} required="Operator"><button className="run-button mission-save" onClick={createMission} disabled={missionId === "UNASSIGNED"} {...opGate}>
             {missionId === "UNASSIGNED" ? "UNASSIGNED HISTORY · NO MISSION DECISION" : saved ? "MISSION DECISION PERSISTED" : "SAVE MISSION DECISION"}
-          </button>
+          </button></RoleControl>
         </article>
       </div>
     </section>
@@ -356,20 +376,20 @@ function ReplayComparisonCard({
             />
             <XAxis
               dataKey="label"
-              tick={{ fill: "#6f8388", fontSize: 9 }}
+              tick={{ fill: "var(--text-secondary)", fontSize: 9 }}
               axisLine={false}
               tickLine={false}
               interval={5}
             />
             <YAxis
               domain={["auto", "auto"]}
-              tick={{ fill: "#6f8388", fontSize: 9 }}
+              tick={{ fill: "var(--text-secondary)", fontSize: 9 }}
               axisLine={false}
               tickLine={false}
             />
             <ReferenceLine
               x={point.label}
-              stroke={accent === "mint" ? "#b9f49a" : "#c4b7ff"}
+              stroke={accent === "mint" ? "var(--brand-accent)" : "#c4b7ff"}
               strokeDasharray="3 3"
               strokeOpacity={0.9}
             />
@@ -395,7 +415,7 @@ function ReplayComparisonCard({
             <Line
               type="monotone"
               dataKey="actual"
-              stroke={accent === "mint" ? "#f6b56e" : "#b8a7ff"}
+              stroke={accent === "mint" ? "var(--status-watch)" : "#b8a7ff"}
               strokeWidth={2}
               dot={false}
             />
@@ -410,7 +430,7 @@ function ReplayComparisonCard({
             <Line
               type="monotone"
               dataKey="residual"
-              stroke={accent === "mint" ? "#b9f49a" : "#c4b7ff"}
+              stroke={accent === "mint" ? "var(--brand-accent)" : "#c4b7ff"}
               strokeWidth={1.6}
               dot={false}
             />
@@ -445,13 +465,19 @@ function StatTile({
   icon: typeof Gauge;
   tone: string;
 }) {
+  const explanations: Record<string, string> = {
+    "ENGINE HEALTH": "What this means: model-estimated engine condition on a 0–100 scale; not a certified safety rating.",
+    "EST. REMAINING LIFE": "What this means: RUL (remaining useful life) is a model estimate, not a service interval.",
+    "MODEL CONFIDENCE": "What this means: a heuristic for this model estimate, not the probability of a safe flight.",
+    "HYBRID ANOMALY": "What this means: combined sensor and physics-model deviation; higher values warrant investigation.",
+  };
   return (
     <div className="stat-tile">
       <div className={`icon-box ${tone}`}>
         <Icon size={16} strokeWidth={1.8} />
       </div>
       <div>
-        <div className="eyebrow">{label}</div>
+        <div className="eyebrow">{label} <InfoTooltip text={explanations[label] ?? `What this means: ${label.toLowerCase()} from the latest model sample.`} /></div>
         <div className="stat-value">
           {value}
           <span>{unit}</span>
@@ -474,7 +500,7 @@ function CircularHealth({
     <div
       className="health-ring"
       style={{
-        background: `conic-gradient(#b9f49a 0deg ${rotation}deg, #26333a ${rotation}deg 360deg)`,
+        background: `conic-gradient(var(--brand-accent) 0deg ${rotation}deg, var(--surface-raised) ${rotation}deg 360deg)`,
       }}
     >
       <div className="health-ring-inner">
@@ -530,7 +556,7 @@ function ControlSlider({
         value={value}
         onChange={event => onChange(Number(event.target.value))}
         style={{
-          background: `linear-gradient(90deg, #b9f49a ${progress}%, #26343d ${progress}%)`,
+          background: `linear-gradient(90deg, var(--brand-accent) ${progress}%, var(--surface-raised) ${progress}%)`,
         }}
       />
       <span className="control-foot">
@@ -543,24 +569,7 @@ function ControlSlider({
   );
 }
 
-type EnginePartId =
-  | "crankcase"
-  | "manifold"
-  | "oil"
-  | "cyl-1"
-  | "cyl-2"
-  | "cyl-3"
-  | "cyl-4";
 
-type EnginePart = {
-  id: EnginePartId;
-  label: string;
-  metric: string;
-  value: string;
-  safe: string;
-  state: "NOMINAL" | "WATCH" | "CRITICAL";
-  history: string[];
-};
 type ChatMessage = {
   role: "user" | "assistant";
   text: string;
@@ -614,6 +623,8 @@ function formatChatDate(timestamp?: string) {
 }
 
 function answerDiagnosticQuestion(part: EnginePart, question: string) {
+  if (part.state === "NO SENSOR") return "No live sensor for this part";
+  if (part.state === "UNAVAILABLE") return `No live reading is available for ${part.label}.`;
   const normalized = question.toLowerCase();
   if (
     normalized.includes("maint") ||
@@ -637,6 +648,8 @@ function answerDiagnosticQuestion(part: EnginePart, question: string) {
 }
 
 function getAiDiagnosticSummary(part: EnginePart) {
+  if (part.state === "NO SENSOR") return { summary: "No live sensor for this part", actions: ["Inspect the part using the maintenance record; no sensor-based conclusion is available."] };
+  if (part.state === "UNAVAILABLE") return { summary: `No live reading is available for ${part.label}.`, actions: ["Wait for a fresh telemetry sample before interpreting its health."] };
   const critical = part.state === "CRITICAL";
   const watch = part.state === "WATCH";
   const summary = critical
@@ -667,12 +680,17 @@ function getAiDiagnosticSummary(part: EnginePart) {
 function EngineTwin3D({
   telemetry,
   controls,
+  connection,
+  role,
 }: {
   telemetry: TelemetrySnapshot;
   controls: StreamControls;
+  connection: "connecting" | "live" | "reconnecting";
+  role: DemoRole;
 }) {
+  const engGate = roleGate(role, "Maintenance Engineer");
   const [exploded, setExploded] = useState(false);
-  const [selectedPart, setSelectedPart] = useState<EnginePart | null>(null);
+  const [selectedPartId, setSelectedPartId] = useState<EnginePartId | null>(null);
   const [chatDraft, setChatDraft] = useState("");
   const [chatSearch, setChatSearch] = useState("");
   const [chatScope, setChatScope] = useState<ChatScope>("component");
@@ -682,84 +700,17 @@ function EngineTwin3D({
     "none"
   );
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
-  const [rotation, setRotation] = useState({ yaw: -8, pitch: 61 });
-  const [zoom, setZoom] = useState(1);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
-  const [orientationEnabled, setOrientationEnabled] = useState(false);
-  const [orientationStatus, setOrientationStatus] = useState<
-    "idle" | "ready" | "needs-permission" | "unsupported"
-  >("idle");
-  const dragRef = useRef({ active: false, x: 0, y: 0, yaw: -8, pitch: 61 });
-  const touchRef = useRef({
-    distance: 0,
-    centerX: 0,
-    centerY: 0,
-    zoom: 1,
-    panX: 0,
-    panY: 0,
-  });
-  const orientationRef = useRef({ beta: 0, gamma: 0 });
-  const oilCritical = telemetry.oilPressure < 25;
-  const oilWatch = telemetry.oilPressure < 29;
-  const tempCritical = telemetry.oilTemp > 112;
-  const cylinders = telemetry.cht.map((cht, index) => ({
-    id: index + 1,
-    cht,
-    egt: telemetry.egt[index],
-    state:
-      telemetry.egt[index] > 850
-        ? "CRITICAL"
-        : telemetry.egt[index] > 840
-          ? "WATCH"
-          : "NOMINAL",
+  const parts = useMemo(() => deriveEngineParts(telemetry, controls), [telemetry, controls]);
+  const selectedPart = parts.find(part => part.id === selectedPartId) ?? null;
+  const getPart = (id: EnginePartId) => parts.find(part => part.id === id)!;
+  const cylinders = parts.filter(part => part.id.startsWith("cyl-")).map(part => ({
+    id: Number(part.id.slice(-1)), cht: telemetry.cht[Number(part.id.slice(-1)) - 1],
+    egt: telemetry.egt[Number(part.id.slice(-1)) - 1], state: part.state,
   }));
-  const partState = (state: EnginePart["state"]) =>
-    state === "CRITICAL" ? "critical" : state === "WATCH" ? "watch" : "nominal";
-  const parts: EnginePart[] = [
-    {
-      id: "crankcase",
-      label: "Crankcase / lubrication",
-      metric: "Oil pressure",
-      value: `${telemetry.oilPressure} psi`,
-      safe: "29–35 psi",
-      state: oilCritical ? "CRITICAL" : oilWatch ? "WATCH" : "NOMINAL",
-      history: [`Current simulated sample · oil pressure ${telemetry.oilPressure} psi`],
-    },
-    {
-      id: "manifold",
-      label: "Intake manifold",
-      metric: "MAP / engine load",
-      value: `${controls.map.toFixed(2)} bar`,
-      safe: "0.42–1.08 bar",
-      state: controls.map > 1 ? "WATCH" : "NOMINAL",
-      history: [`Current simulated sample · MAP ${controls.map.toFixed(2)} bar`],
-    },
-    {
-      id: "oil",
-      label: "Oil circuit",
-      metric: "Oil temperature",
-      value: `${telemetry.oilTemp} °C`,
-      safe: "85–108 °C",
-      state: tempCritical
-        ? "CRITICAL"
-        : telemetry.oilTemp > 108
-          ? "WATCH"
-          : "NOMINAL",
-      history: [`Current simulated sample · oil temperature ${telemetry.oilTemp} °C`],
-    },
-    ...cylinders.map(cylinder => ({
-      id: `cyl-${cylinder.id}` as EnginePartId,
-      label: `Cylinder ${cylinder.id}`,
-      metric: "CHT / EGT",
-      value: `${cylinder.cht} °C / ${cylinder.egt} °C`,
-      safe: "CHT < 225 °C · EGT < 840 °C",
-      state: cylinder.state as EnginePart["state"],
-      history: [`Current simulated sample · EGT ${cylinder.egt} °C / CHT ${cylinder.cht} °C`],
-    })),
-  ];
-  const getPart = (id: EnginePartId) =>
-    parts.find(part => part.id === id) ?? parts[0];
-  const warningCount = parts.filter(part => part.state !== "NOMINAL").length;
+  const partState = (state: EnginePart["state"]) => state === "CRITICAL" ? "critical" : state === "WATCH" ? "watch" : "nominal";
+  const warningCount = parts.filter(part => part.state === "WATCH" || part.state === "CRITICAL").length;
+  const oilCritical = getPart("crankcase").state === "CRITICAL";
+  const tempCritical = getPart("oil").state === "CRITICAL";
   const aiSummary = selectedPart ? getAiDiagnosticSummary(selectedPart) : null;
   const allTranscriptResults = useMemo(() => {
     const query = chatSearch.trim().toLowerCase();
@@ -853,27 +804,6 @@ function EngineTwin3D({
     setChatDraft("");
   };
   useEffect(() => {
-    if (!orientationEnabled) return;
-    if (!("DeviceOrientationEvent" in window)) {
-      setOrientationStatus("unsupported");
-      return;
-    }
-    const handleOrientation = (event: DeviceOrientationEvent) => {
-      const beta = event.beta ?? 0;
-      const gamma = event.gamma ?? 0;
-      orientationRef.current = { beta, gamma };
-      setRotation({
-        yaw: Math.max(-42, Math.min(42, -8 + gamma * 0.65)),
-        pitch: Math.max(48, Math.min(76, 61 + (beta - 45) * 0.28)),
-      });
-    };
-    window.addEventListener("deviceorientation", handleOrientation);
-    setOrientationStatus("ready");
-    return () =>
-      window.removeEventListener("deviceorientation", handleOrientation);
-  }, [orientationEnabled]);
-
-  useEffect(() => {
     if (selectedPart) {
       setChatDraft("");
       setChatSearch("");
@@ -884,7 +814,7 @@ function EngineTwin3D({
       const storedMessages = loadChatTranscript(selectedPart.id);
       const initialMessage: ChatMessage = {
         role: "assistant",
-        text: `I’m ready to answer questions about ${selectedPart.label}. Current status: ${selectedPart.state.toLowerCase()} at ${selectedPart.value}.`,
+        text: selectedPart.state === "NO SENSOR" ? `I’m ready to answer questions about ${selectedPart.label}. No live sensor for this part` : `I’m ready to answer questions about ${selectedPart.label}. Current status: ${selectedPart.state.toLowerCase()} at ${selectedPart.value}.`,
         timestamp: new Date().toISOString(),
       };
       const messages = storedMessages.length
@@ -905,18 +835,21 @@ function EngineTwin3D({
             Inspect the machine <em>as it is.</em>
           </h2>
           <p>
-            Click a component for diagnostics. Explode the replica to inspect
+            Click a component for diagnostics (Engineer). Explode the replica to inspect
             its internal telemetry map.
           </p>
         </div>
         <div className="engine-heading-actions">
-          <button
-            type="button"
-            className={`engine-toggle ${exploded ? "active" : ""}`}
-            onClick={() => setExploded(value => !value)}
-          >
-            <Expand size={14} /> {exploded ? "COLLAPSE VIEW" : "EXPLODE VIEW"}
-          </button>
+          <RoleControl role={role} required="Maintenance Engineer">
+            <button
+              type="button"
+              className={`engine-toggle ${exploded ? "active" : ""}`}
+              onClick={() => setExploded(value => !value)}
+              {...engGate}
+            >
+              <Expand size={14} /> {exploded ? "COLLAPSE VIEW" : "EXPLODE VIEW"}
+            </button>
+          </RoleControl>
           <StatusPill tone={warningCount > 0 ? "amber" : "mint"}>
             <span className="status-dot" />{" "}
             {warningCount > 0 ? `${warningCount} WARNINGS` : "ALL NOMINAL"}
@@ -924,263 +857,11 @@ function EngineTwin3D({
         </div>
       </div>
       <div className="engine-twin-grid">
-        <div
-          className={`panel engine-viewport ${exploded ? "is-exploded" : ""}`}
-        >
-          <div className="engine-viewport-top">
-            <span>
-              <span className="live-dot" /> TELEMETRY-LINKED GEOMETRY
-            </span>
-            <span>AP-04 / 4-CYLINDER FLAT-4</span>
-            <button
-              type="button"
-              className={`orientation-toggle ${orientationEnabled ? "active" : ""}`}
-              onClick={async () => {
-                if (orientationEnabled) {
-                  setOrientationEnabled(false);
-                  setOrientationStatus("idle");
-                  return;
-                }
-                const DeviceOrientation =
-                  window.DeviceOrientationEvent as typeof DeviceOrientationEvent & {
-                    requestPermission?: () => Promise<"granted" | "denied">;
-                  };
-                if (DeviceOrientation.requestPermission) {
-                  const permission =
-                    await DeviceOrientation.requestPermission();
-                  if (permission !== "granted") {
-                    setOrientationStatus("needs-permission");
-                    return;
-                  }
-                }
-                setOrientationEnabled(true);
-              }}
-            >
-              <Smartphone size={12} />{" "}
-              {orientationEnabled ? "MOTION ON" : "USE PHONE MOTION"}
-            </button>
-          </div>
-          <div
-            className="engine-stage"
-            onTouchStart={event => {
-              if (event.touches.length < 2) return;
-              const first = event.touches[0];
-              const second = event.touches[1];
-              touchRef.current = {
-                distance: Math.hypot(
-                  second.clientX - first.clientX,
-                  second.clientY - first.clientY
-                ),
-                centerX: (first.clientX + second.clientX) / 2,
-                centerY: (first.clientY + second.clientY) / 2,
-                zoom,
-                panX: pan.x,
-                panY: pan.y,
-              };
-            }}
-            onTouchMove={event => {
-              if (event.touches.length < 2 || !touchRef.current.distance)
-                return;
-              event.preventDefault();
-              const first = event.touches[0];
-              const second = event.touches[1];
-              const distance = Math.hypot(
-                second.clientX - first.clientX,
-                second.clientY - first.clientY
-              );
-              const centerX = (first.clientX + second.clientX) / 2;
-              const centerY = (first.clientY + second.clientY) / 2;
-              setZoom(
-                Math.max(
-                  0.82,
-                  Math.min(
-                    1.22,
-                    touchRef.current.zoom *
-                      (distance / touchRef.current.distance)
-                  )
-                )
-              );
-              setPan({
-                x: Math.max(
-                  -90,
-                  Math.min(
-                    90,
-                    touchRef.current.panX + centerX - touchRef.current.centerX
-                  )
-                ),
-                y: Math.max(
-                  -60,
-                  Math.min(
-                    60,
-                    touchRef.current.panY + centerY - touchRef.current.centerY
-                  )
-                ),
-              });
-            }}
-            onTouchEnd={() => {
-              touchRef.current.distance = 0;
-            }}
-            onPointerDown={event => {
-              dragRef.current = {
-                active: true,
-                x: event.clientX,
-                y: event.clientY,
-                yaw: rotation.yaw,
-                pitch: rotation.pitch,
-              };
-              event.currentTarget.setPointerCapture(event.pointerId);
-            }}
-            onPointerMove={event => {
-              if (!dragRef.current.active) return;
-              const nextYaw =
-                dragRef.current.yaw +
-                (event.clientX - dragRef.current.x) * 0.32;
-              const nextPitch = Math.max(
-                48,
-                Math.min(
-                  76,
-                  dragRef.current.pitch -
-                    (event.clientY - dragRef.current.y) * 0.22
-                )
-              );
-              setRotation({ yaw: nextYaw, pitch: nextPitch });
-            }}
-            onPointerUp={event => {
-              dragRef.current.active = false;
-              event.currentTarget.releasePointerCapture(event.pointerId);
-            }}
-            onPointerCancel={() => {
-              dragRef.current.active = false;
-            }}
-            onWheel={event => {
-              event.preventDefault();
-              setZoom(value =>
-                Math.max(
-                  0.82,
-                  Math.min(1.22, value + (event.deltaY > 0 ? -0.04 : 0.04))
-                )
-              );
-            }}
-          >
-            <div className="engine-shadow" />
-            <div
-              className={`engine-model ${exploded ? "exploded" : ""}`}
-              style={{
-                transform: `translate3d(${pan.x}px, ${pan.y}px, 0) rotateX(${rotation.pitch}deg) rotateZ(-4deg) rotateY(${rotation.yaw}deg) scale(${zoom})`,
-              }}
-            >
-              <button
-                type="button"
-                aria-label="Open crankcase diagnostics"
-                className={`engine-crankcase engine-part-button ${partState(getPart("crankcase").state)}`}
-                onClick={() => setSelectedPart(getPart("crankcase"))}
-              >
-                <div className="engine-badge">
-                  AP-04
-                  <br />
-                  <small>AERO-PISTON</small>
-                </div>
-                <div className="crankshaft">
-                  <i />
-                  <i />
-                  <i />
-                  <i />
-                </div>
-                <span className="part-hotspot">01</span>
-              </button>
-              <button
-                type="button"
-                aria-label="Open intake manifold diagnostics"
-                className={`engine-manifold engine-part-button ${partState(getPart("manifold").state)}`}
-                onClick={() => setSelectedPart(getPart("manifold"))}
-              >
-                <span />
-                <span />
-                <span />
-                <span />
-                <b className="part-hotspot">02</b>
-              </button>
-              {cylinders.map((cylinder, index) => {
-                const part = getPart(`cyl-${cylinder.id}` as EnginePartId);
-                return (
-                  <button
-                    type="button"
-                    aria-label={`Open cylinder ${cylinder.id} diagnostics`}
-                    className={`cylinder-3d engine-part-button ${partState(part.state)}`}
-                    key={cylinder.id}
-                    onClick={() => setSelectedPart(part)}
-                    style={{
-                      left: `${13 + index * 24}%`,
-                      transform: exploded
-                        ? `translateZ(${index % 2 ? 66 : 46}px) translateY(${index % 2 ? -14 : 14}px) rotateZ(3deg)`
-                        : undefined,
-                    }}
-                  >
-                    <span className="cylinder-head">
-                      <span className="spark-plug" />
-                      <span className="valve-line" />
-                    </span>
-                    <span className="cylinder-barrel">
-                      <span className="fin fin-one" />
-                      <span className="fin fin-two" />
-                      <span className="fin fin-three" />
-                    </span>
-                    <span className="cylinder-foot" />
-                    <span className="cylinder-label">
-                      CYL {cylinder.id}
-                      <b>{cylinder.state !== "NOMINAL" ? " !" : ""}</b>
-                    </span>
-                    <span className="part-hotspot">
-                      {String(cylinder.id + 2).padStart(2, "0")}
-                    </span>
-                  </button>
-                );
-              })}
-              <button
-                type="button"
-                aria-label="Open oil circuit diagnostics"
-                className={`oil-circuit engine-part-button ${partState(getPart("oil").state)}`}
-                onClick={() => setSelectedPart(getPart("oil"))}
-              >
-                <Droplets size={15} />
-                <span>OIL</span>
-              </button>
-            </div>
-            <div className="engine-stage-label">
-              <span>
-                <Fan size={13} /> crankcase / flat-4
-              </span>
-              <span>
-                <Droplets size={13} /> oil circuit
-              </span>
-              <span>
-                <span
-                  className={`status-dot ${warningCount > 0 ? "warning-dot" : ""}`}
-                />{" "}
-                {warningCount > 0 ? "warning state active" : "values updating"}
-              </span>
-            </div>
-            <div className="engine-hint">
-              <MousePointer2 size={13} /> click any glowing component to inspect
-              its history
-            </div>
-          </div>
-          <div className="engine-legend">
-            <span>
-              <i className="legend-dot nominal" /> nominal
-            </span>
-            <span>
-              <i className="legend-dot watch" /> watch
-            </span>
-            <span>
-              <i className="legend-dot critical" /> critical
-            </span>
-            <span>
-              <InfoTooltip text="This is a connected UI twin, not an engineering CAD model. Values are sourced from the app's live telemetry stream." />{" "}
-              data provenance
-            </span>
-          </div>
-        </div>
+        <ErrorBoundary>
+          <Suspense fallback={<div className="panel twin-viewport twin-loading" role="status" aria-label="Loading engine view"><Skeleton className="twin-canvas-wrap" /><Skeleton /><Skeleton /></div>}>
+            <EngineViewport3D telemetry={telemetry} controls={controls} connection={connection} selectedPartId={selectedPartId} onSelectPart={setSelectedPartId} exploded={exploded} role={role} />
+          </Suspense>
+        </ErrorBoundary>
         <div className="panel engine-readouts">
           <div className="panel-top">
             <SectionLabel>
@@ -1255,8 +936,9 @@ function EngineTwin3D({
                 className={`cylinder-readout ${partState(cylinder.state as EnginePart["state"])}`}
                 key={cylinder.id}
                 onClick={() =>
-                  setSelectedPart(getPart(`cyl-${cylinder.id}` as EnginePartId))
+                  setSelectedPartId(`cyl-${cylinder.id}` as EnginePartId)
                 }
+                {...engGate}
               >
                 <div>
                   <span>CYL {cylinder.id}</span>
@@ -1296,7 +978,7 @@ function EngineTwin3D({
         <div
           className="diagnostic-overlay"
           role="presentation"
-          onClick={() => setSelectedPart(null)}
+          onClick={() => setSelectedPartId(null)}
         >
           <div
             className="diagnostic-modal"
@@ -1316,7 +998,7 @@ function EngineTwin3D({
                 type="button"
                 className="modal-close"
                 aria-label="Close diagnostic modal"
-                onClick={() => setSelectedPart(null)}
+                onClick={() => setSelectedPartId(null)}
               >
                 <X size={17} />
               </button>
@@ -1334,7 +1016,7 @@ function EngineTwin3D({
                 {selectedPart.state}
               </StatusPill>
               <span>
-                live value <b>{selectedPart.value}</b>
+                {selectedPart.state === "NO SENSOR" ? "No live sensor for this part" : <>live value <b>{selectedPart.value}</b></>}
               </span>
               <span>
                 safe range <b>{selectedPart.safe}</b>
@@ -1548,7 +1230,7 @@ function EngineTwin3D({
               <button
                 type="button"
                 className="run-button"
-                onClick={() => setSelectedPart(null)}
+                onClick={() => setSelectedPartId(null)}
               >
                 CLOSE INSPECTION <ChevronRight size={13} />
               </button>
@@ -1576,7 +1258,7 @@ function AttentionHeatmap({
             dataKey="time"
             domain={[0, Math.max(...data.map(point => point.time))]}
             tickCount={5}
-            tick={{ fill: "#6f8388", fontSize: 10 }}
+            tick={{ fill: "var(--text-secondary)", fontSize: 10 }}
             axisLine={false}
             tickLine={false}
           />
@@ -1585,7 +1267,7 @@ function AttentionHeatmap({
             dataKey="head"
             domain={[0, 7]}
             tickCount={4}
-            tick={{ fill: "#6f8388", fontSize: 10 }}
+            tick={{ fill: "var(--text-secondary)", fontSize: 10 }}
             axisLine={false}
             tickLine={false}
           />
@@ -1617,7 +1299,7 @@ function AttentionHeatmap({
           />
           <Scatter
             data={data}
-            fill="#b9f49a"
+            fill="var(--brand-accent)"
             shape={(props: any) => {
               const opacity = 0.25 + (props.payload?.weight ?? 0.2) * 0.75;
               const radius = 3 + (props.payload?.weight ?? 0.2) * 4;
@@ -1628,7 +1310,7 @@ function AttentionHeatmap({
                   cy={props.cy}
                   r={isCursor ? radius + 1.5 : radius}
                   fill={isCursor ? "#ffffff" : `rgba(185,244,154,${opacity})`}
-                  stroke={isCursor ? "#b9f49a" : "rgba(185,244,154,.18)"}
+                  stroke={isCursor ? "var(--brand-accent)" : "rgba(185,244,154,.18)"}
                   strokeWidth={isCursor ? 1.5 : 1}
                 />
               );
@@ -1666,10 +1348,8 @@ export default function Home() {
             ? "Telemetry unavailable. Reconnecting automatically…"
             : "Waiting for the server-trained models and live telemetry…"}
         </p>
-        <p>
-          No simulated health or RUL scores are displayed while the model is
-          unavailable.
-        </p>
+        <div className="loading-skeletons" aria-hidden="true"><Skeleton /><Skeleton /><Skeleton /></div>
+        <p>No health or remaining-life estimates are shown without telemetry. {connection === "reconnecting" ? "Check the ground-station connection if this continues." : "The dashboard will open when the first sample arrives."}</p>
       </main>
     );
   return (
@@ -1712,35 +1392,21 @@ function Dashboard({
   setEdgeMode: React.Dispatch<React.SetStateAction<boolean>>;
 }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [nowLabel, setNowLabel] = useState(() =>
-    new Date().toLocaleTimeString("en-GB", {
-      hour12: false,
-      timeZone: "Asia/Kolkata",
-    })
-  );
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    const id = setInterval(
-      () =>
-        setNowLabel(
-          new Date().toLocaleTimeString("en-GB", {
-            hour12: false,
-            timeZone: "Asia/Kolkata",
-          })
-        ),
-      1000
-    );
-    return () => clearInterval(id);
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
   }, []);
-  const [role, setRole] = useState<"Operator" | "Maintenance Engineer">(
-    "Operator"
-  );
+  const { user, signOut } = useDemoAuth();
+  const role = user.role;
   const isMaintenanceEngineer = role === "Maintenance Engineer";
   const [activeSection, setActiveSection] = useState(navItems[0].target);
   const scrollToSection = (target: string) => {
     setActiveSection(target);
+    setSidebarOpen(false);
     document
       .getElementById(target)
-      ?.scrollIntoView({ behavior: "smooth", block: "start" });
+      ?.scrollIntoView({ behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth", block: "start" });
   };
   useEffect(() => {
     const targets = navItems.map(item => item.target);
@@ -1804,6 +1470,11 @@ function Dashboard({
       startMap = controls.map;
     const targetRpm = startRpm < 5200 ? 7000 : 3400;
     const targetMap = startRpm < 5200 ? 1.02 : 0.5;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setControls(previous => ({ ...previous, rpm: targetRpm, map: targetMap }));
+      setTransitionRunning(false);
+      return;
+    }
     const durationMs = 2500;
     const startTime = performance.now();
     const tick = (now: number) => {
@@ -1831,12 +1502,10 @@ function Dashboard({
         cylinder: `CYL ${index + 1}`,
         cht,
         egt: telemetry.egt[index],
-        residual: Number(
-          (1.1 + index * 0.3 + controls.cylinderBias / 70).toFixed(1)
-        ),
-        state: index === 2 && telemetry.anomaly > 0.5 ? "WATCH" : "NOMINAL",
+        residual: telemetry.physics.residuals.egt[index],
+        state: telemetry.egt[index] > 840 || cht > 225 ? "WATCH" : "NOMINAL",
       })),
-    [controls.cylinderBias, telemetry.anomaly, telemetry.cht, telemetry.egt]
+    [telemetry.cht, telemetry.egt, telemetry.physics.residuals.egt]
   );
   const selectedReplay = flightLogs[replayRun] ?? flightLogs[0];
   const comparisonReplay = flightLogs[compareRun] ?? flightLogs[1] ?? flightLogs[0];
@@ -1864,7 +1533,7 @@ function Dashboard({
     return () => window.clearInterval(timer);
   }, [isPlaying, selectedReplay?.id, selectedReplay?.data.length, replaySpeed]);
 
-  if (!selectedReplay || !replayPoint) return <main className="model-loading"><h1>AeroTwin · Live simulator</h1><p>{replayError ? "Stored replay unavailable. Live telemetry remains active." : "Waiting for stored mission telemetry…"}</p><ScenarioPanel role={role} onRun={async (id, nextControls) => { setControls(nextControls); setScenarioRunId(id); await refreshReplays(); }} /></main>;
+  if (!selectedReplay || !replayPoint) return <main className="model-loading"><h1>Ground control</h1><p role="status">{replayError ? "Stored replay is unavailable. Check the replay service and try again." : "Loading stored mission telemetry. The live stream is still connecting."}</p>{!replayError && <div className="loading-skeletons" aria-hidden="true"><Skeleton /><Skeleton /><Skeleton /></div>}<ScenarioPanel role={role} onRun={async (id, nextControls) => { setControls(nextControls); setScenarioRunId(id); await refreshReplays(); }} /></main>;
 
   return (
     <div className={`app-shell ${isLight ? "light-mode" : ""}`}>
@@ -1891,7 +1560,7 @@ function Dashboard({
           <ChevronRight size={14} />
         </div>
         <nav className="nav-list">
-          {navItems.map(({ label, icon: Icon, count, target }) => {
+          {navItems.map(({ label, icon: Icon, target }) => {
             const active = activeSection === target;
             return (
               <button
@@ -1901,103 +1570,42 @@ function Dashboard({
               >
                 <Icon size={17} />
                 <span>{label}</span>
-                {count && <b>{count}</b>}
                 {active && <i />}
               </button>
             );
           })}
-          {isMaintenanceEngineer && (
-            <Link href="/model-evidence" className="nav-item">
-              <BrainCircuit size={17} />
-              <span>Model evidence</span>
-            </Link>
-          )}
+          <Link href="/model-evidence" className={`nav-item ${!isMaintenanceEngineer ? "role-nav-locked" : ""}`}>
+            <BrainCircuit size={17} />
+            <span>Model evidence</span>
+            {!isMaintenanceEngineer && <LockKeyhole size={13} aria-label="Only Engineer can do this" />}
+          </Link>
         </nav>
-        <div className="sidebar-bottom">
-          <div className="stream-card">
-            <div className="stream-head">
-              <span className="live-dot" />
-              STREAMING
-            </div>
-            <strong>1 SEC</strong>
-            <span>SSE / ground station</span>
-            <div className="signal-bars">
-              <i />
-              <i />
-              <i />
-              <i />
-              <i />
-            </div>
-          </div>
-          <button className="nav-item muted">
-            <SlidersHorizontal size={17} />
-            <span>System settings</span>
-          </button>
-          <div className="operator">
-            <div className="avatar">RK</div>
-            <div>
-              <strong>R. KAPOOR</strong>
-              <span>Flight safety ops</span>
-            </div>
-            <ChevronRight size={14} />
-          </div>
-        </div>
+        <div className="sidebar-bottom"><div className="operator"><div className="avatar" aria-hidden="true">{initials(user.displayName)}</div><div><strong>{user.displayName}</strong><span>{role}</span></div></div></div>
       </aside>
 
       <main className="main-content">
         <header className="topbar">
-          <button
-            className="mobile-menu"
-            onClick={() => setSidebarOpen(!sidebarOpen)}
-            aria-label="Toggle navigation"
-          >
-            <Menu size={18} />
-          </button>
-          <div className="crumb">
-            <span>GROUND CONTROL</span>
-            <ChevronRight size={13} />
-            <strong>ENGINE HEALTH MONITORING</strong>
+          <div className="header-identity">
+            <button type="button" className="mobile-menu" onClick={() => setSidebarOpen(!sidebarOpen)} aria-label={sidebarOpen ? "Close navigation" : "Open navigation"} aria-expanded={sidebarOpen}><Menu size={19} /></button>
+            <div className="header-brand" aria-label="AeroTwin"><span className="brand-mark" aria-hidden="true"><span /><span /><span /></span><strong>AeroTwin</strong></div>
+            <span className="header-page">Overview</span>
           </div>
           <div className="top-actions">
-            <span className="utc">
-              <span className="live-dot" />
-              LIVE <b>{nowLabel}</b> UTC+05:30
-            </span>
-            <button
-              className="icon-button"
-              aria-label="Toggle light and dark mode"
-              onClick={() => setIsLight(value => !value)}
-            >
-              {isLight ? <Moon size={16} /> : <Sun size={16} />}
-              <i />
-            </button>
-            <button className="icon-button" aria-label="Notifications">
-              <AlertTriangle size={17} />
-            </button>
-            <label className="role-picker">
-              <span className="sr-only">Dashboard role</span>
-              <select
-                aria-label="Dashboard role"
-                value={role}
-                onChange={event =>
-                  setRole(
-                    event.target.value as "Operator" | "Maintenance Engineer"
-                  )
-                }
-              >
-                <option value="Operator">Operator</option>
-                <option value="Maintenance Engineer">
-                  Maintenance Engineer
-                </option>
-              </select>
-            </label>
-            <div className="top-avatar">RK</div>
+            <span className={`connection-pill ${connection === "live" ? "online" : "offline"}`} role="status" aria-live="polite">{connection === "live" ? <Check size={14} /> : <RotateCcw size={14} />}{connection === "live" ? "Live" : "Reconnecting"}</span>
+            <button type="button" className="icon-button" aria-label={isLight ? "Switch to dark mode" : "Switch to light mode"} onClick={() => setIsLight(value => !value)}>{isLight ? <Moon size={18} /> : <Sun size={18} />}</button>
+            <div className="user-chip">
+              <div className="top-avatar" aria-hidden="true">{initials(user.displayName)}</div>
+              <span className="user-name">{user.displayName}</span>
+              <span className="role-badge">{role}</span>
+              <button type="button" className="signout-button" onClick={signOut}>Sign out</button>
+            </div>
           </div>
         </header>
 
         <div className="page-wrap">
+          <EngineStatusSummary telemetry={telemetry} connection={connection} now={now} />
           <section className={`panel role-workspace ${isMaintenanceEngineer ? "engineer" : "operator-view"}`} aria-label={`${role} workspace`}>
-            <div><span className="section-label">{isMaintenanceEngineer ? "MAINTENANCE ENGINEER / DIAGNOSTIC WORKSPACE" : "OPERATOR / FLIGHT DECISION WORKSPACE"}</span><h2>{isMaintenanceEngineer ? "Investigate and clear the asset" : "Monitor and respond in flight"}</h2><p>{isMaintenanceEngineer ? `Model health ${telemetry.health}/100 · RUL ${telemetry.rul} h · ${telemetry.faults.length} active fault types. Review residuals, component evidence and maintenance actions below.` : `Live health ${telemetry.health}/100 · ${telemetry.faults.length ? "Review engine alert and consider return-to-base." : "No active faults; continue monitoring."} Use mission safety planner for recovery decisions.`}</p></div>
+            <div><span className="section-label">{isMaintenanceEngineer ? "MAINTENANCE ENGINEER / DIAGNOSTIC WORKSPACE" : "OPERATOR / FLIGHT DECISION WORKSPACE"}</span><h2>{isMaintenanceEngineer ? "Investigate and clear the asset" : "Monitor and respond in flight"}</h2><p>{isMaintenanceEngineer ? `Model health ${telemetry.health}/100 · RUL ${telemetry.rul.toFixed(1)} h · ${telemetry.faults.length} active fault types. Review residuals, component evidence and maintenance actions below.` : `Live health ${telemetry.health}/100 · ${telemetry.faults.length ? "Review engine alert and consider return-to-base." : "No active faults; continue monitoring."} Use mission safety planner for recovery decisions.`}</p></div>
             <span className="role-workspace-badge">{isMaintenanceEngineer ? "DIAGNOSTICS + MODEL EVIDENCE" : "FLIGHT STATUS + ROUTE SAFETY"}</span>
           </section>
           {connection !== "live" && (
@@ -2025,12 +1633,11 @@ function Dashboard({
                 <span className="status-dot" />
                 AI-ENABLED DIGITAL TWIN / REV 2026.4.1
               </div>
-              <h1>
-                Real-time health <em>intelligence.</em>
-              </h1>
+              <h2>
+                Engine health <em>at a glance.</em>
+              </h2>
               <p>
-                Hybrid residual modeling for mission safety, fault prediction,
-                and engine reliability.
+                See the current engine condition, the recommended next step, and the readings behind it.
               </p>
             </div>
             <div className="intro-actions">
@@ -2068,7 +1675,7 @@ function Dashboard({
               tone="cyan"
             />
             <StatTile
-              label="ANOMALY SCORE"
+              label="HYBRID ANOMALY"
               value={datasetPrediction.anomaly.toFixed(2)}
               unit="/1.00"
               icon={Zap}
@@ -2077,7 +1684,7 @@ function Dashboard({
           </div>
 
           <section className="hero-grid">
-            <article id="section-overview" className="panel hero-panel">
+            <article className="panel hero-panel">
               <div className="panel-top">
                 <SectionLabel>
                   01 / ENGINE HEALTH MONITORING{" "}
@@ -2129,11 +1736,11 @@ function Dashboard({
                       <Wifi size={12} /> 150 MS STREAM
                     </span>
                   </div>
-                  <div className="mini-chart">
+                  <RoleSection role={role} required="Maintenance Engineer"><div className="mini-chart">
                     <div className="mini-chart-label">
                       <span>ANOMALY TRAJECTORY</span>
                       <strong>
-                        {telemetry.anomaly > 0.5 ? "+12.4%" : "−3.8%"}{" "}
+                        {telemetry.anomaly.toFixed(2)}{" "}
                         <ArrowUpRight size={12} />
                       </strong>
                     </div>
@@ -2149,12 +1756,12 @@ function Dashboard({
                           >
                             <stop
                               offset="0%"
-                              stopColor="#b9f49a"
+                              stopColor="var(--brand-accent)"
                               stopOpacity={0.24}
                             />
                             <stop
                               offset="100%"
-                              stopColor="#b9f49a"
+                              stopColor="var(--brand-accent)"
                               stopOpacity={0}
                             />
                           </linearGradient>
@@ -2162,7 +1769,7 @@ function Dashboard({
                         <Area
                           type="monotone"
                           dataKey="residual"
-                          stroke="#b9f49a"
+                          stroke="var(--brand-accent)"
                           fill="url(#anomaly-fill)"
                           strokeWidth={2}
                           dot={false}
@@ -2171,7 +1778,7 @@ function Dashboard({
                         <XAxis hide dataKey="time" />
                       </AreaChart>
                     </ResponsiveContainer>
-                  </div>
+                  </div></RoleSection>
                 </div>
               </div>
             </article>
@@ -2193,9 +1800,9 @@ function Dashboard({
                   the prognostic response.
                 </p>
               </div>
-              <fieldset
+              <RoleSection role={role} required="Operator"><fieldset
                 className="control-list"
-                disabled={Boolean(enduranceId)}
+                disabled={Boolean(enduranceId) || isMaintenanceEngineer}
               >
                 <ControlSlider
                   label="Engine RPM"
@@ -2247,24 +1854,26 @@ function Dashboard({
                   hint="inject isolated fault"
                   onChange={value => updateControl("cylinderBias", value)}
                 />
-              </fieldset>
+              </fieldset></RoleSection>
               <EndurancePanel
                 controls={controls}
                 telemetry={telemetry}
                 trend={enduranceTrend}
                 activeId={enduranceId}
                 onRunChange={setEnduranceId}
+                role={role}
               />
-              <button
+              <RoleControl role={role} required="Operator"><button
                 type="button"
                 className="run-button"
-                disabled={transitionRunning || Boolean(enduranceId)}
+                disabled={transitionRunning || Boolean(enduranceId) || isMaintenanceEngineer}
+                aria-disabled={isMaintenanceEngineer || undefined}
                 onClick={runRapidThrottleTransition}
               >
                 {transitionRunning
                   ? "RUNNING TRANSIENT…"
                   : "RUN RAPID THROTTLE TRANSITION"}
-              </button>
+              </button></RoleControl>
               <div className="control-footnote">
                 <span>
                   <Check size={13} /> input sanitizer armed
@@ -2274,7 +1883,7 @@ function Dashboard({
             </article>
           </section>
 
-          <EngineTwin3D telemetry={telemetry} controls={controls} />
+          <RoleSection role={role} required="Maintenance Engineer"><EngineTwin3D telemetry={telemetry} controls={controls} connection={connection} role={role} /></RoleSection>
 
           <section id="section-telemetry" className="section-block">
             <div className="section-heading">
@@ -2303,21 +1912,21 @@ function Dashboard({
                 <div className="telemetry-icon">
                   <Gauge size={17} />
                 </div>
-                <span>RPM / MAP</span>
+                <span>ENGINE SPEED / MAP <InfoTooltip text="What this means: MAP is manifold absolute pressure, an indicator of engine load; shown in bar." /></span>
                 <strong>
                   {controls.rpm.toLocaleString()}
                   <small>rpm · {controls.map.toFixed(2)} bar</small>
                 </strong>
-                <StatusPill>STABLE</StatusPill>
+                <StatusPill>Current reading</StatusPill>
               </div>
               <div className="telemetry-card">
                 <div className="telemetry-icon amber">
                   <Thermometer size={17} />
                 </div>
-                <span>OIL TEMP / PRESSURE</span>
+                <MetricLabel label="OIL TEMPERATURE / PRESSURE" meaning="Oil heat in °C and supply pressure in psi; low pressure or high heat needs attention." />
                 <strong>
-                  {telemetry.oilTemp}
-                  <small>°C · {telemetry.oilPressure} psi</small>
+                  {telemetry.oilTemp.toFixed(1)}
+                  <small>°C · {telemetry.oilPressure.toFixed(1)} psi</small>
                 </strong>
                 <StatusPill tone={telemetry.oilPressure < 24 ? "rose" : "mint"}>
                   {telemetry.oilPressure < 24 ? "LOW" : "STABLE"}
@@ -2327,7 +1936,7 @@ function Dashboard({
                 <div className="telemetry-icon cyan">
                   <Zap size={17} />
                 </div>
-                <span>FUEL FLOW</span>
+                <MetricLabel label="FUEL FLOW" meaning="Fuel delivered to the engine per hour, in litres per hour." />
                 <strong>
                   {telemetry.fuelFlow}
                   <small>L/h</small>
@@ -2338,7 +1947,7 @@ function Dashboard({
                 <div className="telemetry-icon rose">
                   <Activity size={17} />
                 </div>
-                <span>VIBRATION</span>
+                <MetricLabel label="VIBRATION" meaning="Engine vibration in millimetres per second; a higher value can indicate imbalance or combustion trouble." />
                 <strong>
                   {telemetry.vibration}
                   <small>mm/s</small>
@@ -2351,7 +1960,7 @@ function Dashboard({
                 <div className="telemetry-icon cyan">
                   <BatteryCharging size={17} />
                 </div>
-                <span>BATTERY / ALTERNATOR</span>
+                <MetricLabel label="BATTERY / ALTERNATOR" meaning="Battery voltage and estimated alternator output health." />
                 <strong>
                   {telemetry.batteryVoltage}
                   <small>V · {telemetry.alternatorHealth}%</small>
@@ -2362,18 +1971,18 @@ function Dashboard({
                 <div className="telemetry-icon">
                   <Gauge size={17} />
                 </div>
-                <span>INJECTION TIMING</span>
+                <MetricLabel label="INJECTION TIMING" meaning="Fuel injection timing in crankshaft degrees before top dead centre (BTDC)." />
                 <strong>
                   {telemetry.injectionTiming}
                   <small>° BTDC</small>
                 </strong>
                 <StatusPill>ECU SYNCH</StatusPill>
               </div>
-              <div className="telemetry-card fault-card">
+              <RoleSection role={role} required="Maintenance Engineer"><div className="telemetry-card fault-card">
                 <div className="telemetry-icon amber">
                   <ShieldAlert size={17} />
                 </div>
-                <span>FAULT-TYPE DETECTION</span>
+                <MetricLabel label="ACTIVE FAULTS" meaning="Number of classified fault types in the latest live sample; review each before acting." />
                 <strong>
                   {telemetry.faults?.length ?? 0}
                   <small> active</small>
@@ -2386,12 +1995,12 @@ function Dashboard({
                     <span key={fault.type}>{fault.type}</span>
                   ))}
                 </div>
-              </div>
+              </div></RoleSection>
               <div className="telemetry-card">
                 <div className="telemetry-icon cyan">
                   <Radio size={17} />
                 </div>
-                <span>CAN / ECU INGESTION</span>
+                <MetricLabel label="ECU DATA LINK" meaning="Frames decoded from the controller area network (CAN) and the current engine control unit (ECU) link state." />
                 <strong>
                   {telemetry.can?.frames ?? 18}
                   <small> frames decoded</small>
@@ -2408,17 +2017,19 @@ function Dashboard({
                 >
                   ECU LINK {telemetry.ecu?.linkState ?? "OK"}
                 </StatusPill>
-                <button
+                <RoleControl role={role} required="Operator"><button
                   type="button"
                   className="edge-mode-toggle"
                   aria-pressed={edgeMode}
+                  aria-disabled={isMaintenanceEngineer || undefined}
+                  disabled={isMaintenanceEngineer}
                   onClick={() => setEdgeMode(value => !value)}
                   title="View signed telemetry sent by the separate onboard process; Random Forest and temporal analysis run on the ground. Onboard controls are fixed in this demo."
                 >
                   <StatusPill tone={telemetry.edgeMode ? "amber" : "mint"}>
                     EDGE MODE {telemetry.edgeMode ? "ON" : "OFF"}
                   </StatusPill>
-                </button>
+                </button></RoleControl>
                 {isMaintenanceEngineer && (
                   <div className="can-debug">
                     <b>RAW CAN FRAMES</b>
@@ -2446,10 +2057,7 @@ function Dashboard({
             id="section-diagnostics"
             className={`analysis-grid ${isMaintenanceEngineer ? "" : "operator-analysis"}`}
           >
-            <article
-              className="panel large-panel"
-              hidden={!isMaintenanceEngineer}
-            >
+            <RoleSection role={role} required="Maintenance Engineer"><article className="panel large-panel">
               <div className="panel-top">
                 <SectionLabel>
                   03 / PHYSICS RESIDUAL MODEL{" "}
@@ -2501,7 +2109,7 @@ function Dashboard({
                     />
                     <XAxis
                       dataKey="time"
-                      tick={{ fill: "#6f8388", fontSize: 10 }}
+                      tick={{ fill: "var(--text-secondary)", fontSize: 10 }}
                       axisLine={false}
                       tickLine={false}
                     />
@@ -2511,7 +2119,7 @@ function Dashboard({
                         (min: number) => Math.floor(min - 5),
                         (max: number) => Math.ceil(max + 5),
                       ]}
-                      tick={{ fill: "#6f8388", fontSize: 10 }}
+                      tick={{ fill: "var(--text-secondary)", fontSize: 10 }}
                       axisLine={false}
                       tickLine={false}
                     />
@@ -2547,7 +2155,7 @@ function Dashboard({
                       yAxisId="temp"
                       type="monotone"
                       dataKey="actual"
-                      stroke="#f6b56e"
+                      stroke="var(--status-watch)"
                       strokeWidth={2.3}
                       dot={false}
                     />
@@ -2564,7 +2172,7 @@ function Dashboard({
                       yAxisId="residual"
                       type="monotone"
                       dataKey="residual"
-                      stroke="#b9f49a"
+                      stroke="var(--brand-accent)"
                       strokeWidth={1.7}
                       dot={false}
                     />
@@ -2578,9 +2186,9 @@ function Dashboard({
                 </span>
                 <span>window 50 samples / 1.8s shown</span>
               </div>
-            </article>
+            </article></RoleSection>
 
-            <EfficiencyTrend run={selectedReplay} />
+            <RoleSection role={role} required="Maintenance Engineer"><EfficiencyTrend run={selectedReplay} /></RoleSection>
           </section>
 
           <ScenarioPanel role={role} activeRun={scenarioRunId ? undefined : flightLogs.find(run => run.id.startsWith("SCN-"))} onRun={async (id, nextControls) => { setControls(nextControls); setScenarioRunId(id); setIsPlaying(false); await refreshReplays(); }} />
@@ -2650,14 +2258,14 @@ function Dashboard({
                     />
                     <XAxis
                       dataKey="label"
-                      tick={{ fill: "#6f8388", fontSize: 10 }}
+                      tick={{ fill: "var(--text-secondary)", fontSize: 10 }}
                       axisLine={false}
                       tickLine={false}
                     />
                     <YAxis
                       yAxisId="temp"
                       domain={["auto", "auto"]}
-                      tick={{ fill: "#6f8388", fontSize: 10 }}
+                      tick={{ fill: "var(--text-secondary)", fontSize: 10 }}
                       axisLine={false}
                       tickLine={false}
                     />
@@ -2690,7 +2298,7 @@ function Dashboard({
                       yAxisId="temp"
                       type="monotone"
                       dataKey="actual"
-                      stroke="#f6b56e"
+                      stroke="var(--status-watch)"
                       strokeWidth={2}
                       dot={false}
                     />
@@ -2707,7 +2315,7 @@ function Dashboard({
                       yAxisId="residual"
                       type="monotone"
                       dataKey="residual"
-                      stroke="#b9f49a"
+                      stroke="var(--brand-accent)"
                       strokeWidth={1.7}
                       dot={false}
                     />
@@ -2819,13 +2427,13 @@ function Dashboard({
             </div>
           </section>
 
-          <MaintenanceAdvisory advisories={telemetry.advisories} />
-          <MissionPlanner telemetry={telemetry} missionId={selectedReplay.id} />
+          <RoleSection role={role} required="Maintenance Engineer"><MaintenanceAdvisory advisories={telemetry.advisories} /></RoleSection>
+          <MissionPlanner telemetry={telemetry} missionId={selectedReplay.id} role={role} />
 
-          {isMaintenanceEngineer && <ModelEvidence />}
+          <RoleSection role={role} required="Maintenance Engineer"><ModelEvidence /></RoleSection>
 
           <section className="lower-grid">
-            <article className="panel cylinder-panel">
+            <RoleSection role={role} required="Maintenance Engineer"><article className="panel cylinder-panel">
               <div className="panel-top">
                 <SectionLabel>07 / ISOLATED MULTI-CYLINDER PHM</SectionLabel>
                 <span className="panel-code">MAP / OIL / CHT / EGT</span>
@@ -2833,9 +2441,9 @@ function Dashboard({
               <div className="cylinder-table">
                 <div className="table-row table-head">
                   <span>CHANNEL</span>
-                  <span>CHT</span>
-                  <span>EGT</span>
-                  <span>RESIDUAL</span>
+                  <span>CHT <InfoTooltip text="What this means: cylinder head temperature, in °C. Higher readings can signal heat stress." /></span>
+                  <span>EGT <InfoTooltip text="What this means: exhaust gas temperature, in °C. Compare cylinders to spot combustion differences." /></span>
+                  <span>RESIDUAL <InfoTooltip text="What this means: the difference between the measured temperature and the expected physics baseline." /></span>
                   <span>STATE</span>
                 </div>
                 {cylinderRows.map(row => (
@@ -2845,15 +2453,15 @@ function Dashboard({
                       {row.cylinder}
                     </span>
                     <strong>
-                      {row.cht}
+                      {row.cht.toFixed(1)}
                       <small>°C</small>
                     </strong>
                     <strong>
-                      {row.egt}
+                      {row.egt.toFixed(1)}
                       <small>°C</small>
                     </strong>
                     <strong className={row.residual > 1.8 ? "amber-text" : ""}>
-                      {row.residual}
+                      {row.residual.toFixed(1)}
                       <small>Δ</small>
                     </strong>
                     <StatusPill tone={row.state === "WATCH" ? "amber" : "mint"}>
@@ -2866,10 +2474,10 @@ function Dashboard({
                 <span>
                   <Check size={13} /> sensor map complete
                 </span>
-                <span>sample age 0.2s — 0.5s</span>
+                <span>{Number.isFinite(new Date(telemetry.ts).getTime()) ? `Last sample ${Math.max(0, Math.floor((now - new Date(telemetry.ts).getTime()) / 1000))} s ago` : "Sample time unavailable"}</span>
               </div>
-            </article>
-            <article className="panel anomaly-panel">
+            </article></RoleSection>
+            <RoleSection role={role} required="Maintenance Engineer"><article className="panel anomaly-panel">
               <div className="panel-top">
                 <SectionLabel>08 / DIAGNOSTIC WORKSPACE</SectionLabel>
                 <button className="text-button">
@@ -2880,7 +2488,7 @@ function Dashboard({
                 {telemetry.faults.length === 0 && <p className="empty-replay">No active faults in the current live telemetry. Review persisted faults in the mission PDF.</p>}
                 {telemetry.faults.map((fault, index) => <div className="anomaly-row" key={`${fault.type}-${index}`}><div className="anomaly-icon amber"><AlertTriangle size={14} /></div><div className="anomaly-copy"><strong>{fault.type}</strong><p>{fault.detail} · confidence {(fault.confidence * 100).toFixed(0)}%</p></div><StatusPill tone={fault.severity === "HIGH" ? "rose" : "amber"}>{fault.severity}</StatusPill></div>)}
               </div>
-            </article>
+            </article></RoleSection>
           </section>
 
           <footer className="page-footer">

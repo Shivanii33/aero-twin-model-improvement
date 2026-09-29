@@ -6,3 +6,7 @@ pmOnFail: ignore
 minimumReleaseAgeExclude:
   - '@next/*'
   - next
+
+allowBuilds:
+  '@tailwindcss/oxide': true
+  esbuild: true
